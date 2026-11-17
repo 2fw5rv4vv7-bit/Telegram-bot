@@ -2,3 +2,5 @@ python-telegram-bot>=21
 httpx
 flask
 yt-dlp
+gallery-dl
+
