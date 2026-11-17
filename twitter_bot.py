@@ -9,7 +9,8 @@ import httpx
 from flask import Flask, request
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from instagram import IG_RE, process_instagram
+from instagram import IG_RE, process_instagram, find_profiles, process_profile
+
 
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 CHAT_ID = int(os.environ["CHAT_ID"])
@@ -121,13 +122,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     tw = TWEET_RE.findall(text)
     ig = IG_RE.findall(text)
-    if not tw and not ig:
+    prof = [] if (tw or ig) else find_profiles(text)
+    if not (tw or ig or prof):
         return
-    await context.bot.send_chat_action(chat_id, "upload_video")
+    await context.bot.send_chat_action(chat_id, "upload_document")
     if tw:
         await process_links(context.bot, chat_id, tw)
     if ig:
         await process_instagram(context.bot, chat_id, ig)
+    if prof:
+        await process_profile(context.bot, chat_id, prof)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
