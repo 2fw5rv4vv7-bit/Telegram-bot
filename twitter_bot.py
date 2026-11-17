@@ -1,13 +1,18 @@
+import asyncio
 import io
 import logging
 import os
 import re
+import threading
 
 import httpx
-from telegram import Update
+from flask import Flask, request
+from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
+CHAT_ID = int(os.environ["CHAT_ID"])
+SECRET = os.environ["SECRET"]
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("twitter_bot")
@@ -61,16 +66,15 @@ async def get_media(client, user, tid):
     return None
 
 
-async def send_media(update, client, item):
+async def send_media(bot, chat_id, client, item):
     url = item["url"]
     kind = item["type"]
-    msg = update.effective_message
 
     try:
         if kind == "photo":
-            await msg.reply_photo(url)
+            await bot.send_photo(chat_id, url)
         else:
-            await msg.reply_video(url, supports_streaming=True)
+            await bot.send_video(chat_id, url, supports_streaming=True)
         return
     except Exception as e:
         log.info("Direct send failed (%s), falling back to upload", e)
@@ -78,14 +82,37 @@ async def send_media(update, client, item):
     r = await client.get(url)
     r.raise_for_status()
     if len(r.content) > MAX_UPLOAD:
-        await msg.reply_text(f"File too large for Telegram. Direct link:\n{url}")
+        await bot.send_message(chat_id, f"File too large for Telegram. Direct link:\n{url}")
         return
     bio = io.BytesIO(r.content)
     bio.name = url.split("?")[0].rsplit("/", 1)[-1] or "media"
     if kind == "photo":
-        await msg.reply_document(bio)
+        await bot.send_document(chat_id, bio)
     else:
-        await msg.reply_video(bio, supports_streaming=True)
+        await bot.send_video(chat_id, bio, supports_streaming=True)
+
+
+async def process_links(bot, chat_id, matches):
+    async with httpx.AsyncClient(
+        timeout=60, headers=HEADERS, follow_redirects=True
+    ) as client:
+        for user, tid in matches:
+            media = await get_media(client, user, tid)
+            if media is None:
+                await bot.send_message(chat_id, "Couldn't fetch that tweet.")
+                continue
+            if not media:
+                await bot.send_message(chat_id, "No photos or videos in that tweet.")
+                continue
+
+            for item in media:
+                try:
+                    await send_media(bot, chat_id, client, item)
+                except Exception:
+                    log.exception("Failed sending media")
+                    await bot.send_message(
+                        chat_id, f"Couldn't send one item. Direct link:\n{item['url']}"
+                    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,29 +120,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matches = TWEET_RE.findall(text)
     if not matches:
         return
-
-    await context.bot.send_chat_action(update.effective_chat.id, "upload_video")
-
-    async with httpx.AsyncClient(
-        timeout=60, headers=HEADERS, follow_redirects=True
-    ) as client:
-        for user, tid in matches:
-            media = await get_media(client, user, tid)
-            if media is None:
-                await update.effective_message.reply_text("Couldn't fetch that tweet.")
-                continue
-            if not media:
-                await update.effective_message.reply_text("No photos or videos in that tweet.")
-                continue
-
-            for item in media:
-                try:
-                    await send_media(update, client, item)
-                except Exception:
-                    log.exception("Failed sending media")
-                    await update.effective_message.reply_text(
-                        f"Couldn't send one item. Direct link:\n{item['url']}"
-                    )
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id, "upload_video")
+    await process_links(context.bot, chat_id, matches)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,7 +131,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------- Bookmark endpoint ----------
+web = Flask(__name__)
+
+
+async def push(matches):
+    async with Bot(BOT_TOKEN) as bot:
+        await process_links(bot, CHAT_ID, matches)
+
+
+def run_push(matches):
+    try:
+        asyncio.run(push(matches))
+    except Exception:
+        log.exception("push failed")
+
+
+@web.post("/bookmark")
+def bookmark():
+    if request.headers.get("X-Secret") != SECRET:
+        return "no", 403
+    url = (request.get_json(silent=True) or {}).get("url", "")
+    matches = TWEET_RE.findall(url)
+    if not matches:
+        return "bad url", 400
+    threading.Thread(target=run_push, args=(matches,), daemon=True).start()
+    return "ok"
+
+
+@web.get("/")
+def home():
+    return "running"
+
+
+def start_web():
+    port = int(os.environ.get("PORT", 5000))
+    web.run(host="0.0.0.0", port=port)
+
+
 def main():
+    threading.Thread(target=start_web, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
