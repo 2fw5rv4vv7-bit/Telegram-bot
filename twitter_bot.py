@@ -7,7 +7,7 @@ import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("twitter_bot")
@@ -16,13 +16,49 @@ TWEET_RE = re.compile(
     r"https?://(?:www\.|mobile\.)?(?:twitter\.com|x\.com)/(\w+)/status/(\d+)"
 )
 MAX_UPLOAD = 50 * 1024 * 1024
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+}
 
 
-async def fetch_tweet(client, user, tweet_id):
-    r = await client.get(f"https://api.fxtwitter.com/{user}/status/{tweet_id}")
+async def from_fx(client, user, tid):
+    r = await client.get(f"https://api.fxtwitter.com/{user}/status/{tid}")
+    log.info("fxtwitter status %s", r.status_code)
     if r.status_code != 200:
         return None
-    return r.json().get("tweet")
+    tweet = r.json().get("tweet") or {}
+    items = (tweet.get("media") or {}).get("all") or []
+    return [
+        {"url": i["url"], "type": "photo" if i.get("type") == "photo" else "video"}
+        for i in items
+        if i.get("url")
+    ]
+
+
+async def from_vx(client, user, tid):
+    r = await client.get(f"https://api.vxtwitter.com/{user}/status/{tid}")
+    log.info("vxtwitter status %s", r.status_code)
+    if r.status_code != 200:
+        return None
+    items = r.json().get("media_extended") or []
+    return [
+        {"url": i["url"], "type": "photo" if i.get("type") == "image" else "video"}
+        for i in items
+        if i.get("url")
+    ]
+
+
+async def get_media(client, user, tid):
+    for fn in (from_fx, from_vx):
+        try:
+            result = await fn(client, user, tid)
+        except Exception:
+            log.exception("%s failed", fn.__name__)
+            result = None
+        if result is not None:
+            return result
+    return None
 
 
 async def send_media(update, client, item):
@@ -39,7 +75,7 @@ async def send_media(update, client, item):
     except Exception as e:
         log.info("Direct send failed (%s), falling back to upload", e)
 
-    r = await client.get(url, follow_redirects=True)
+    r = await client.get(url)
     r.raise_for_status()
     if len(r.content) > MAX_UPLOAD:
         await msg.reply_text(f"File too large for Telegram. Direct link:\n{url}")
@@ -60,14 +96,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(update.effective_chat.id, "upload_video")
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        for user, tweet_id in matches:
-            tweet = await fetch_tweet(client, user, tweet_id)
-            if not tweet:
+    async with httpx.AsyncClient(
+        timeout=60, headers=HEADERS, follow_redirects=True
+    ) as client:
+        for user, tid in matches:
+            media = await get_media(client, user, tid)
+            if media is None:
                 await update.effective_message.reply_text("Couldn't fetch that tweet.")
                 continue
-
-            media = (tweet.get("media") or {}).get("all") or []
             if not media:
                 await update.effective_message.reply_text("No photos or videos in that tweet.")
                 continue
