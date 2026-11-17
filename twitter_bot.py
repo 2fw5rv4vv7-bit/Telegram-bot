@@ -132,6 +132,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_instagram(context.bot, chat_id, ig)
     if prof:
         await process_profile(context.bot, chat_id, prof)
+    if update.effective_chat.id != CHAT_ID:
+        return
+
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
