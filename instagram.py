@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import tempfile
 
 from ig_caption import info_caption, meta_caption
@@ -41,43 +40,22 @@ async def _do_post(bot, chat_id, url):
         info = None
         err = ""
         files = []
-
         if is_story:
-            m = re.search(r"/stories/([^/?#]+)/", url)
-            who = m.group(1) if m else ""
-            if who and who != "highlights":
-                err = await asyncio.to_thread(
-                    gallery_profile, who, media, cookies, 50, "stories")
-            else:
-                err = await asyncio.to_thread(gallery_post, url, media, cookies)
+            err = await asyncio.to_thread(gallery_post, url, media, cookies)
             files = list_files(media)
-
         if not files:
             try:
                 info = await asyncio.to_thread(ytdlp, url, media, cookies)
             except Exception as e:
                 err = err or str(e)[-250:]
             files = list_files(media)
-
         if not files and not is_story:
             err = await asyncio.to_thread(gallery_post, url, media, cookies) or err
             files = list_files(media)
-
-        if not files and cookies and not is_story:
-            try:
-                info = await asyncio.to_thread(ytdlp, url, media, None)
-            except Exception:
-                pass
-            files = list_files(media)
-            if not files:
-                await asyncio.to_thread(gallery_post, url, media, None)
-                files = list_files(media)
-
         if not files:
             extra = f"\n\nReason: {err.strip()}" if err.strip() else ""
             await bot.send_message(chat_id, hint(cookies) + extra)
             return
-
         clean = url.split("?")[0]
         if info:
             caption = info_caption(info, url)
@@ -110,10 +88,6 @@ async def _do_profile(bot, chat_id, username, limit, mode):
         err = await asyncio.to_thread(
             gallery_profile, username, media, cookies, limit, mode)
         files = list_files(media)
-        if not files and cookies and mode not in LOGIN_MODES:
-            await asyncio.to_thread(
-                gallery_profile, username, media, None, limit, mode)
-            files = list_files(media)
         if not files:
             extra = f"\n\nReason: {err.strip()}" if err.strip() else ""
             await bot.send_message(chat_id, hint(cookies) + extra)
